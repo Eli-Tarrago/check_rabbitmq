@@ -1,4 +1,22 @@
 #!/usr/bin/env python3
+"""
+RabbitMQ Nagios NRPE Health Check
+Copyright (C) 2024  Nick Thuesen
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+"""
+
 import argparse
 import shlex
 import subprocess
@@ -6,6 +24,7 @@ import sys
 import json
 import re
 import requests
+import urllib3
 
 if "check_output" not in dir(subprocess):
     def check_output(*popenargs, **kwargs):
@@ -65,16 +84,28 @@ class RabbitCmdWrapper(object):
         return return_data
 
 
+def threshold_sanity(critical, warning):
+    """Make sure we use both thresholds, not just one"""
+    if warning and not critical:
+        print("UNKNOWN - Define both thresholds, not just warning")
+        sys.exit(3)
+    elif critical and not warning:
+        print("UNKNOWN - Define both thresholds, not just critical")
+
+
 def check_connection_count(critical=0, warning=0):
     """Checks to make sure the numbers of connections are within parameters."""
     try:
         count = len(RabbitCmdWrapper.list_connections())
-        if count >= critical:
-            print(f"CRITICAL - Connection Count {count}")
-            sys.exit(2)
-        elif count >= warning:
-            print(f"WARNING - Connection Count {count}")
-            sys.exit(1)
+        if (critical and warning):
+            if count >= critical:
+                print(f"CRITICAL - Connection Count {count}|connections={count};{warning};{critical};0;;")
+                sys.exit(2)
+            elif count >= warning:
+                print(f"WARNING - Connection Count {count}|connections={count};{warning};{critical};0;;")
+                sys.exit(1)
+            else:
+                print(f"OK - Connection Count {count}|connections={count};{warning};{critical};0;;")
         else:
             print(f"OK - Connection Count {count}")
     except Exception as err:
@@ -146,10 +177,7 @@ def check_aliveness(username, password, timeout, cluster, port, ssl, certificate
     If everything is working correctly, will return HTTP status 200 with body
     """
     try:
-        if ssl:
-            protocol = "https"
-        else:
-            protocol = "http"
+        protocol = "https" if ssl else "http"
         url = f"{protocol}://{cluster}:{port}/api/aliveness-test/%2F"
         r = requests.get(url, auth=(username, password), timeout=timeout, verify=certificate_verify)
     except requests.exceptions.RequestException as e:  # Throw error if rabbitmq is down
@@ -168,18 +196,12 @@ def check_aliveness(username, password, timeout, cluster, port, ssl, certificate
 
 def check_cluster(username, password, timeout, cluster, port, ssl, certificate_verify):
     """Checks the health of a cluster, if a node is not running mark as offline"""
+    urllib3.disable_warnings()
     try:
         protocol = "https" if ssl else "http"
         url = f"{protocol}://{cluster}:{port}/api/nodes"
-        headers = {'Content-Type': 'application/json'}  # Adjust if needed
-        print(f"{username} : {password}")
         
-        r = requests.get(url, auth=(username, password), timeout=timeout, verify=certificate_verify, headers=headers)
-        
-        # Print response details for debugging
-        print(f"URL: {url}")
-        print(f"Status Code: {r.status_code}")
-        print(f"Response Content: {r.text}")
+        r = requests.get(url, auth=(username, password), timeout=timeout, verify=certificate_verify)
         
         if r.status_code == 401:
             print("Critical - Not authorized: Check your username and password")
@@ -242,6 +264,7 @@ if __name__ == "__main__":
     options = parser.parse_args()
 
     if options.action == "connection_count":
+        threshold_sanity(options.critical, options.warning)
         check_connection_count(options.critical, options.warning)
     elif options.action == "queues_count":
         check_queues_count(options.critical, options.warning)
