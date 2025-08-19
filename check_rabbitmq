@@ -30,6 +30,12 @@ class RabbitCmdWrapper(object):
        if desired."""
 
     @classmethod
+    def list_vhosts(cls):
+        args = shlex.split("sudo rabbitmqctl list_vhosts -q")
+        cmd_result = subprocess.check_output(args).strip().decode('utf-8')
+        return [v for v in cmd_result.split("\n") if v.strip()]
+
+    @classmethod
     def list_connections(cls):
         args = shlex.split("sudo rabbitmqctl list_connections")
         cmd_result = subprocess.check_output(args).strip().decode('utf-8')
@@ -42,6 +48,28 @@ class RabbitCmdWrapper(object):
         cmd_result = subprocess.check_output(args).strip().decode('utf-8')
         results = cls._parse_list_results(cmd_result)
         return results
+
+    @classmethod
+    def list_queues_with_state(cls, vhost=None):
+        if vhost:
+            args = shlex.split(f'sudo rabbitmqctl list_queues -q -p {vhost} name state')
+        else:
+            args = shlex.split('sudo rabbitmqctl list_queues -q name state')
+        cmd_result = subprocess.check_output(args).strip().decode('utf-8')
+        # Robust parse: drop noise and any accidental header row
+        rows = []
+        for line in cmd_result.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("Timeout:") or line.startswith("Listing "):
+                continue
+            cols = line.split("\t")
+            # Ignore accidental 'name\tstate' header
+            if len(cols) == 2 and cols[0] == "name" and cols[1] == "state":
+                continue
+            rows.append(cols)
+        return rows
 
     @classmethod
     def status(cls):
@@ -115,6 +143,35 @@ def check_queues_count(critical=1000, warning=1000):
         print("CRITICAL - %s" % err)
         sys.exit(2)
 
+def check_queues_state():
+    """Check all queues across all vhosts and report their state; empty vhosts are OK."""
+    try:
+        vhosts = RabbitCmdWrapper.list_vhosts()
+        critical_q = []
+        checked = 0
+
+        for v in vhosts:
+            results = RabbitCmdWrapper.list_queues_with_state(v)
+            # If this vhost has no queues, that's fine—continue
+            for cols in results:
+                # Expect exactly [name, state]
+                if len(cols) != 2:
+                    continue
+                qname, state = cols[0], cols[1]
+                checked += 1
+                if state != "running":
+                    critical_q.append(f"{v}/{qname}: {state}")
+
+        if critical_q:
+            print("CRITICAL - Non-running queues: " + ", ".join(critical_q))
+            sys.exit(2)
+        else:
+            print(f"OK - All queues running ({checked} queues checked)")
+            sys.exit(0)
+
+    except Exception as err:
+        print("CRITICAL - %s" % err)
+        sys.exit(2)
 
 def check_mem_usage(critical=75, warning=50):
     """Check to make sure the RAM usage of rabbitmq process does not exceed 50%% of its max"""
@@ -188,7 +245,7 @@ def check_cluster(username, password, timeout, cluster):
         print("CRITICAL: RabbitMQ cluster is critical: Not running %s" % failed_nodes)
         sys.exit(2)
     else:
-        print("OK: RabbitMQ cluster members: %s" % (" ".join(running_nodes)))
+        print(f"OK: RabbitMQ cluster members: {" ".join(running_nodes)}")
         sys.exit(0)
 
 
@@ -198,6 +255,8 @@ USAGE = """Usage: ./check_rabbitmq -a action [-C critical] [-W warning]
              checks the number of connection in rabbitmq's list_connections
            - queues_count
              checks the count in each of the queues in rabbitmq's list_queues
+           - queues_state
+             checks the state of each queue in all vhosts in rabbitmq's list_queues\      
            - mem_usage
              checks to ensure mem usage of rabbitmq process does not exceed 50%
            - aliveness
@@ -228,6 +287,8 @@ if __name__ == "__main__":
         check_connection_count(options.critical, options.warning)
     elif options.action == "queues_count":
         check_queues_count(options.critical, options.warning)
+    elif options.action == "queues_state":
+        check_queues_state()
     elif options.action == "mem_usage":
         check_mem_usage(options.critical, options.warning)
     elif options.action == "aliveness":
@@ -235,5 +296,5 @@ if __name__ == "__main__":
     elif options.action == "cluster_status":
         check_cluster(options.username, options.password, options.timeout, options.cluster)
     else:
-        print("Invalid action: %s" % options.action)
+        print(f"Invalid action: {options.action}")
         print(USAGE)
